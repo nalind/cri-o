@@ -214,7 +214,12 @@ var listPodSandboxCommand = cli.Command{
 func RunPodSandbox(client pb.RuntimeServiceClient, opts createOptions) error {
 	config, err := loadPodSandboxConfig(opts.configPath)
 	if err != nil {
-		return err
+		if opts.configPath != "" && opts.name == "" {
+			return err
+		}
+		config = &pb.PodSandboxConfig{
+			Metadata: &pb.PodSandboxMetadata{},
+		}
 	}
 
 	// Override the name by the one specified through CLI
