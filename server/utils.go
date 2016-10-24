@@ -65,15 +65,6 @@ func copyFile(src, dest string) error {
 	return err
 }
 
-func removeFile(path string) error {
-	if _, err := os.Stat(path); err == nil {
-		if err := os.Remove(path); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func parseDNSOptions(servers, searches []string, path string) error {
 	nServers := len(servers)
 	nSearches := len(searches)

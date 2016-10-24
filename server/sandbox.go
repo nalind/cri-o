@@ -165,8 +165,8 @@ func (s *Server) RunPodSandbox(ctx context.Context, req *pb.RunPodSandboxRequest
 	resolvPath := fmt.Sprintf("%s/resolv.conf", podSandboxDir)
 	err = parseDNSOptions(dnsServers, dnsSearches, resolvPath)
 	if err != nil {
-		err1 := removeFile(resolvPath)
-		if err1 != nil {
+		err1 := os.Remove(resolvPath)
+		if err1 != nil && !os.IsNotExist(err1) {
 			err = err1
 			return nil, fmt.Errorf("%v; failed to remove %s: %v", err, resolvPath, err1)
 		}
