@@ -51,10 +51,10 @@ pause:
 	$(MAKE) -C $@
 
 bin2img:
-	$(MAKE) -C test/$@ BUILDTAGS="$(BUILDTAGS)"
+	$(MAKE) -C test/$@ BUILDTAGS="$(BUILDTAGS)" PROJECT="$(PROJECT)"
 
 copyimg:
-	$(MAKE) -C test/$@ BUILDTAGS="$(BUILDTAGS)"
+	$(MAKE) -C test/$@ BUILDTAGS="$(BUILDTAGS)" PROJECT="$(PROJECT)"
 
 checkseccomp: check-gopath
 	$(MAKE) -C test/$@
