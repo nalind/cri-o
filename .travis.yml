@@ -19,6 +19,11 @@ install:
 
 before_script:
   - export PATH=$HOME/gopath/bin:$PATH
+  - if test ${TRAVIS_REPO_SLUG} != kubernetes-incubator/cri-o; then
+      mkdir -p ${GOPATH}/src/github.com/kubernetes-incubator/cri-o/ ;
+      rsync -aHAX ${TRAVIS_BUILD_DIR}/ ${GOPATH}/src/github.com/kubernetes-incubator/cri-o/ ;
+      cd ${GOPATH}/src/github.com/kubernetes-incubator/cri-o/ ;
+    fi
 
 script:
   - make .gitvalidation
@@ -29,4 +34,4 @@ script:
   - make
 
 notifications:
-  irc: "chat.freenode.net#cri-o"
+  irc: false
