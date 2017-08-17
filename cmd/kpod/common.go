@@ -47,9 +47,5 @@ func getConfig(c *cli.Context) (*libkpod.Config, error) {
 			config.StorageOptions = opts
 		}
 	}
-	if c.Bool("debug") {
-		logrus.SetLevel(logrus.DebugLevel)
-	}
-
 	return config, nil
 }

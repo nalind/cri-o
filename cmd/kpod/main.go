@@ -15,7 +15,6 @@ func main() {
 	if reexec.Init() {
 		return
 	}
-	logrus.SetLevel(logrus.ErrorLevel)
 
 	app := cli.NewApp()
 	app.Name = "kpod"
@@ -39,6 +38,13 @@ func main() {
 		tagCommand,
 		umountCommand,
 		versionCommand,
+	}
+	app.Before = func(c *cli.Context) error {
+		logrus.SetLevel(logrus.ErrorLevel)
+		if c.GlobalBool("debug") {
+			logrus.SetLevel(logrus.DebugLevel)
+		}
+		return nil
 	}
 	app.Flags = []cli.Flag{
 		cli.StringFlag{
