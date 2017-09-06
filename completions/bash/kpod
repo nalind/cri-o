@@ -364,6 +364,14 @@ _kpod_ps() {
      _complete_ "$options_with_args" "$boolean_options"
 }
 
+_kpod_stop() {
+     local options_with_args="
+     --timeout -t
+     "
+     local boolean_options=""
+     _complete_ "$options_with_args" "$boolean_options"
+}
+
 _complete_() {
     local options_with_args=$1
     local boolean_options="$2 -h --help"
