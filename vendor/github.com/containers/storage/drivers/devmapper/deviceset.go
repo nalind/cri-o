@@ -263,11 +263,7 @@ func (devices *DeviceSet) ensureImage(name string, size int64) (string, error) {
 	dirname := devices.loopbackDir()
 	filename := path.Join(dirname, name)
 
-	uid, gid, err := idtools.GetRootUIDGID(devices.uidMaps, devices.gidMaps)
-	if err != nil {
-		return "", err
-	}
-	if err := idtools.MkdirAllAs(dirname, 0700, uid, gid); err != nil && !os.IsExist(err) {
+	if err := os.MkdirAll(dirname, 0711); err != nil && !os.IsExist(err) {
 		return "", err
 	}
 
@@ -1688,11 +1684,7 @@ func (devices *DeviceSet) initDevmapper(doInit bool) (retErr error) {
 
 	//create the root dir of the devmapper driver ownership to match this
 	//daemon's remapped root uid/gid so containers can start properly
-	uid, gid, err := idtools.GetRootUIDGID(devices.uidMaps, devices.gidMaps)
-	if err != nil {
-		return err
-	}
-	if err := idtools.MkdirAs(devices.root, 0700, uid, gid); err != nil && !os.IsExist(err) {
+	if err := os.MkdirAll(devices.root, 0711); err != nil && !os.IsExist(err) {
 		return err
 	}
 	if err := os.MkdirAll(devices.metadataDir(), 0700); err != nil && !os.IsExist(err) {

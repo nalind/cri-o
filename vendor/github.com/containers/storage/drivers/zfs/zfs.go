@@ -104,7 +104,7 @@ func Init(base string, opt []string, uidMaps, gidMaps []idtools.IDMap) (graphdri
 	if err != nil {
 		return nil, fmt.Errorf("Failed to get root uid/guid: %v", err)
 	}
-	if err := idtools.MkdirAllAs(base, 0700, rootUID, rootGID); err != nil {
+	if err := idtools.MkdirAllAndChownNew(base, 0711, idtools.IDPair{UID: rootUID, GID: rootGID}); err != nil {
 		return nil, fmt.Errorf("Failed to create '%s': %v", base, err)
 	}
 
@@ -119,7 +119,7 @@ func Init(base string, opt []string, uidMaps, gidMaps []idtools.IDMap) (graphdri
 		gidMaps:          gidMaps,
 		ctr:              graphdriver.NewRefCounter(graphdriver.NewDefaultChecker()),
 	}
-	return graphdriver.NewNaiveDiffDriver(d, uidMaps, gidMaps), nil
+	return graphdriver.NewNaiveDiffDriver(d, graphdriver.NewNaiveLayerIDMapUpdater(d)), nil
 }
 
 func parseOptions(opt []string) (zfsOptions, error) {
@@ -367,13 +367,9 @@ func (d *Driver) Get(id, mountLabel string) (string, error) {
 	options := label.FormatMountLabel("", mountLabel)
 	logrus.Debugf(`[zfs] mount("%s", "%s", "%s")`, filesystem, mountpoint, options)
 
-	rootUID, rootGID, err := idtools.GetRootUIDGID(d.uidMaps, d.gidMaps)
-	if err != nil {
-		d.ctr.Decrement(mountpoint)
-		return "", err
-	}
+	rootPair := idtools.NewIDMappingsFromMaps(d.uidMaps, d.gidMaps).RootPair()
 	// Create the target directories if they don't exist
-	if err := idtools.MkdirAllAs(mountpoint, 0755, rootUID, rootGID); err != nil {
+	if err := idtools.MkdirAllAndChownNew(mountpoint, 0755, rootPair); err != nil {
 		d.ctr.Decrement(mountpoint)
 		return "", err
 	}
@@ -385,7 +381,7 @@ func (d *Driver) Get(id, mountLabel string) (string, error) {
 
 	// this could be our first mount after creation of the filesystem, and the root dir may still have root
 	// permissions instead of the remapped root uid:gid (if user namespaces are enabled):
-	if err := os.Chown(mountpoint, rootUID, rootGID); err != nil {
+	if err := os.Chown(mountpoint, rootPair.UID, rootPair.GID); err != nil {
 		mount.Unmount(mountpoint)
 		d.ctr.Decrement(mountpoint)
 		return "", fmt.Errorf("error modifying zfs mountpoint (%s) directory ownership: %v", mountpoint, err)

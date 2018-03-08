@@ -54,7 +54,7 @@ func Init(home string, options []string, uidMaps, gidMaps []idtools.IDMap) (grap
 		locker:    locker.New(),
 	}
 
-	return graphdriver.NewNaiveDiffDriver(d, uidMaps, gidMaps), nil
+	return graphdriver.NewNaiveDiffDriver(d, graphdriver.NewNaiveLayerIDMapUpdater(d)), nil
 }
 
 func (d *Driver) String() string {
@@ -172,18 +172,13 @@ func (d *Driver) Get(id, mountLabel string) (string, error) {
 		return rootFs, nil
 	}
 
-	uid, gid, err := idtools.GetRootUIDGID(d.uidMaps, d.gidMaps)
-	if err != nil {
-		d.ctr.Decrement(mp)
-		return "", err
-	}
-
+	rootPair := idtools.NewIDMappingsFromMaps(d.uidMaps, d.gidMaps).RootPair()
 	// Create the target directories if they don't exist
-	if err := idtools.MkdirAllAs(path.Join(d.home, "mnt"), 0755, uid, gid); err != nil && !os.IsExist(err) {
+	if err := os.MkdirAll(path.Join(d.home, "mnt"), 0711); err != nil && !os.IsExist(err) {
 		d.ctr.Decrement(mp)
 		return "", err
 	}
-	if err := idtools.MkdirAs(mp, 0755, uid, gid); err != nil && !os.IsExist(err) {
+	if err := idtools.MkdirAs(mp, 0711, rootPair.UID, rootPair.GID); err != nil && !os.IsExist(err) {
 		d.ctr.Decrement(mp)
 		return "", err
 	}
@@ -194,7 +189,7 @@ func (d *Driver) Get(id, mountLabel string) (string, error) {
 		return "", err
 	}
 
-	if err := idtools.MkdirAllAs(rootFs, 0755, uid, gid); err != nil && !os.IsExist(err) {
+	if err := idtools.MkdirAllAndChownNew(rootFs, 0755, rootPair); err != nil && !os.IsExist(err) {
 		d.ctr.Decrement(mp)
 		d.DeviceSet.UnmountDevice(id, mp)
 		return "", err

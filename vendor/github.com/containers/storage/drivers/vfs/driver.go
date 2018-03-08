@@ -29,8 +29,7 @@ func Init(home string, options []string, uidMaps, gidMaps []idtools.IDMap) (grap
 		homes:      []string{home},
 		idMappings: idtools.NewIDMappingsFromMaps(uidMaps, gidMaps),
 	}
-	rootIDs := d.idMappings.RootPair()
-	if err := idtools.MkdirAllAndChown(home, 0700, rootIDs); err != nil {
+	if err := os.MkdirAll(filepath.Join(home, "dir"), 0711); err != nil {
 		return nil, err
 	}
 	for _, option := range options {
@@ -43,7 +42,7 @@ func Init(home string, options []string, uidMaps, gidMaps []idtools.IDMap) (grap
 			continue
 		}
 	}
-	return graphdriver.NewNaiveDiffDriver(d, uidMaps, gidMaps), nil
+	return graphdriver.NewNaiveDiffDriver(d, graphdriver.NewNaiveLayerIDMapUpdater(d)), nil
 }
 
 // Driver holds information about the driver, home directory of the driver.
@@ -88,10 +87,18 @@ func (d *Driver) Create(id, parent string, opts *graphdriver.CreateOpts) error {
 
 	dir := d.dir(id)
 	rootIDs := d.idMappings.RootPair()
-	if err := idtools.MkdirAllAndChown(filepath.Dir(dir), 0700, rootIDs); err != nil {
+	if err := idtools.MkdirAllAndChownNew(filepath.Dir(dir), 0711, rootIDs); err != nil {
 		return err
 	}
-	if err := idtools.MkdirAndChown(dir, 0755, rootIDs); err != nil {
+	if parent != "" {
+		st, err := system.Stat(d.dir(parent))
+		if err != nil {
+			return err
+		}
+		rootIDs.UID = int(st.UID())
+		rootIDs.GID = int(st.GID())
+	}
+	if err := idtools.MkdirAs(dir, 0755, rootIDs.UID, rootIDs.GID); err != nil {
 		return err
 	}
 	labelOpts := []string{"level:s0"}
