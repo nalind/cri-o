@@ -12,10 +12,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/containers/storage"
+	cstorage "github.com/containers/storage"
 	"github.com/kubernetes-incubator/cri-o/lib/sandbox"
 	"github.com/kubernetes-incubator/cri-o/oci"
 	"github.com/kubernetes-incubator/cri-o/pkg/annotations"
+	"github.com/kubernetes-incubator/cri-o/pkg/storage"
 	runtimespec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/opencontainers/runtime-tools/generate"
 	"github.com/opencontainers/selinux/go-selinux/label"
@@ -155,7 +156,28 @@ func (s *Server) RunPodSandbox(ctx context.Context, req *pb.RunPodSandboxRequest
 			s.ReleaseContainerName(containerName)
 		}
 	}()
-
+	// Use our configuration to specify ID mappings for the container's storage.  Maybe this will be
+	// configurable in req.GetConfig().GetLinux().GetSecurityContext().GetNamespaceOptions() later.
+	uidmap := s.Store().UIDMap()
+	gidmap := s.Store().GIDMap()
+	idmapOptions := storage.IDMapOptions{
+		HostUIDMapping: len(uidmap) == 0,
+		HostGIDMapping: len(gidmap) == 0,
+	}
+	for _, m := range uidmap {
+		idmapOptions.UIDMap = append(idmapOptions.UIDMap, runtimespec.LinuxIDMapping{
+			ContainerID: uint32(m.ContainerID),
+			HostID:      uint32(m.HostID),
+			Size:        uint32(m.Size),
+		})
+	}
+	for _, m := range gidmap {
+		idmapOptions.GIDMap = append(idmapOptions.GIDMap, runtimespec.LinuxIDMapping{
+			ContainerID: uint32(m.ContainerID),
+			HostID:      uint32(m.HostID),
+			Size:        uint32(m.Size),
+		})
+	}
 	podContainer, err := s.StorageRuntimeServer().CreatePodSandbox(s.ImageContext(),
 		name, id,
 		s.config.PauseImage, "",
@@ -164,8 +186,9 @@ func (s *Server) RunPodSandbox(ctx context.Context, req *pb.RunPodSandboxRequest
 		req.GetConfig().GetMetadata().GetUid(),
 		namespace,
 		attempt,
-		nil)
-	if errors.Cause(err) == storage.ErrDuplicateName {
+		nil,
+		&idmapOptions)
+	if errors.Cause(err) == cstorage.ErrDuplicateName {
 		return nil, fmt.Errorf("pod sandbox with name %q already exists", name)
 	}
 	if err != nil {
@@ -214,11 +237,14 @@ func (s *Server) RunPodSandbox(ctx context.Context, req *pb.RunPodSandboxRequest
 		if err := label.Relabel(resolvPath, mountLabel, true); err != nil && err != unix.ENOTSUP {
 			return nil, err
 		}
+		if err := unix.Chown(resolvPath, int(podContainer.RootUID), int(podContainer.RootGID)); err != nil {
+			return nil, err
+		}
 		mnt := runtimespec.Mount{
 			Type:        "bind",
 			Source:      resolvPath,
 			Destination: "/etc/resolv.conf",
-			Options:     []string{"ro", "bind"},
+			Options:     []string{"ro", "bind", "nosuid", "nodev"},
 		}
 		g.AddMount(mnt)
 	}
@@ -376,6 +402,17 @@ func (s *Server) RunPodSandbox(ctx context.Context, req *pb.RunPodSandboxRequest
 	}
 	g.AddAnnotation(annotations.PortMappings, string(portMappingsJSON))
 
+	uidMapJSON, err := json.Marshal(podContainer.UIDMap)
+	if err != nil {
+		return nil, err
+	}
+	g.AddAnnotation(annotations.UIDMappings, string(uidMapJSON))
+	gidMapJSON, err := json.Marshal(podContainer.GIDMap)
+	if err != nil {
+		return nil, err
+	}
+	g.AddAnnotation(annotations.GIDMappings, string(gidMapJSON))
+
 	// setup cgroup settings
 	cgroupParent := req.GetConfig().GetLinux().GetCgroupParent()
 	if cgroupParent != "" {
@@ -399,7 +436,21 @@ func (s *Server) RunPodSandbox(ctx context.Context, req *pb.RunPodSandboxRequest
 	}
 	g.AddAnnotation(annotations.CgroupParent, cgroupParent)
 
-	sb, err := sandbox.New(id, namespace, name, kubeName, logDir, labels, kubeAnnotations, processLabel, mountLabel, metadata, shmPath, cgroupParent, privileged, trusted, resolvPath, hostname, portMappings)
+	if len(podContainer.UIDMap) > 0 || len(podContainer.GIDMap) > 0 {
+		// Set ID mappings in the namespace to match the on-disk values, which may have been
+		// set even if we didn't specifically request any.
+		for _, m := range podContainer.UIDMap {
+			g.AddLinuxUIDMapping(m.HostID, m.ContainerID, m.Size)
+		}
+		for _, m := range podContainer.GIDMap {
+			g.AddLinuxGIDMapping(m.HostID, m.ContainerID, m.Size)
+		}
+		if err := g.AddOrReplaceLinuxNamespace(string(runtimespec.UserNamespace), ""); err != nil {
+			return nil, err
+		}
+	}
+
+	sb, err := sandbox.New(id, namespace, name, kubeName, logDir, labels, kubeAnnotations, processLabel, mountLabel, metadata, shmPath, cgroupParent, privileged, trusted, resolvPath, hostname, portMappings, podContainer.UIDMap, podContainer.GIDMap)
 	if err != nil {
 		return nil, err
 	}
@@ -509,7 +560,7 @@ func (s *Server) RunPodSandbox(ctx context.Context, req *pb.RunPodSandboxRequest
 		Type:        "bind",
 		Source:      hostnamePath,
 		Destination: "/etc/hostname",
-		Options:     []string{"ro", "bind"},
+		Options:     []string{"ro", "bind", "nosuid", "nodev"},
 	}
 	g.AddMount(mnt)
 	g.AddAnnotation(annotations.HostnamePath, hostnamePath)

@@ -1008,6 +1008,52 @@ func (s *Server) createSandboxContainer(ctx context.Context, containerID string,
 		}
 	}
 
+	// Decide which user namespace to use and what ID mappings we should specify for the container's storage
+	var idmapOptions *storage.IDMapOptions
+	userNamespaceMode := pb.NamespaceMode_NODE
+	if linux != nil {
+		// If we ever get User namespace options, this should key off of that instead of Network.
+		userNamespaceMode = containerConfig.GetLinux().GetSecurityContext().GetNamespaceOptions().GetNetwork()
+		switch userNamespaceMode {
+		case pb.NamespaceMode_NODE:
+			// Use no ID mappings.
+			specgen.RemoveLinuxNamespace(string(rspec.UserNamespace))
+			idmapOptions = &storage.IDMapOptions{HostUIDMapping: true, HostGIDMapping: true}
+		case pb.NamespaceMode_POD:
+			// Use the sandbox's user namespace and ID mappings.
+			userNsPath := sb.UserNsPath()
+			if err := specgen.AddOrReplaceLinuxNamespace(string(rspec.UserNamespace), userNsPath); err != nil {
+				return nil, err
+			}
+			idmapOptions = &storage.IDMapOptions{UIDMap: sb.UIDMap(), GIDMap: sb.GIDMap()}
+		case pb.NamespaceMode_CONTAINER:
+			// Use a fresh namespace and the mappings from the daemon's configuration.
+			if err := specgen.AddOrReplaceLinuxNamespace(string(rspec.UserNamespace), ""); err != nil {
+				return nil, err
+			}
+			uidmap := s.Store().UIDMap()
+			gidmap := s.Store().GIDMap()
+			idmapOptions = &storage.IDMapOptions{
+				HostUIDMapping: len(uidmap) == 0,
+				HostGIDMapping: len(gidmap) == 0,
+			}
+			for _, m := range uidmap {
+				idmapOptions.UIDMap = append(idmapOptions.UIDMap, rspec.LinuxIDMapping{
+					ContainerID: uint32(m.ContainerID),
+					HostID:      uint32(m.HostID),
+					Size:        uint32(m.Size),
+				})
+			}
+			for _, m := range gidmap {
+				idmapOptions.GIDMap = append(idmapOptions.GIDMap, rspec.LinuxIDMapping{
+					ContainerID: uint32(m.ContainerID),
+					HostID:      uint32(m.HostID),
+					Size:        uint32(m.Size),
+				})
+			}
+		}
+	}
+
 	netNsPath := sb.NetNsPath()
 	if netNsPath == "" {
 		// The sandbox does not have a permanent namespace,
@@ -1085,7 +1131,7 @@ func (s *Server) createSandboxContainer(ctx context.Context, containerID string,
 			Type:        "bind",
 			Source:      sb.ResolvPath(),
 			Destination: "/etc/resolv.conf",
-			Options:     append(options, "bind"),
+			Options:     append(options, "bind", "nosuid", "nodev"),
 		}
 		// bind mount the pod resolver file
 		specgen.AddMount(mnt)
@@ -1100,7 +1146,7 @@ func (s *Server) createSandboxContainer(ctx context.Context, containerID string,
 			Type:        "bind",
 			Source:      sb.HostnamePath(),
 			Destination: "/etc/hostname",
-			Options:     append(options, "bind"),
+			Options:     append(options, "bind", "nosuid", "nodev"),
 		}
 		specgen.AddMount(mnt)
 	}
@@ -1120,7 +1166,7 @@ func (s *Server) createSandboxContainer(ctx context.Context, containerID string,
 			Type:        "bind",
 			Source:      "/etc/hosts",
 			Destination: "/etc/hosts",
-			Options:     append(options, "bind"),
+			Options:     append(options, "bind", "nosuid", "nodev"),
 		}
 		specgen.AddMount(mnt)
 	}
@@ -1178,7 +1224,8 @@ func (s *Server) createSandboxContainer(ctx context.Context, containerID string,
 		metaname,
 		attempt,
 		mountLabel,
-		nil)
+		nil,
+		idmapOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -1190,6 +1237,12 @@ func (s *Server) createSandboxContainer(ctx context.Context, containerID string,
 			}
 		}
 	}()
+
+	if sb.ResolvPath() != "" {
+		if err := unix.Chown(sb.ResolvPath(), int(containerInfo.RootUID), int(containerInfo.RootGID)); err != nil {
+			return nil, err
+		}
+	}
 
 	mountPoint, err := s.StorageRuntimeServer().StartContainer(containerID)
 	if err != nil {
@@ -1207,6 +1260,17 @@ func (s *Server) createSandboxContainer(ctx context.Context, containerID string,
 		// this key is defined in image-spec conversion document at https://github.com/opencontainers/image-spec/pull/492/files#diff-8aafbe2c3690162540381b8cdb157112R57
 		specgen.AddAnnotation("org.opencontainers.image.stopSignal", containerImageConfig.Config.StopSignal)
 	}
+
+	uidMapJSON, err := json.Marshal(containerInfo.UIDMap)
+	if err != nil {
+		return nil, err
+	}
+	specgen.AddAnnotation(annotations.UIDMappings, string(uidMapJSON))
+	gidMapJSON, err := json.Marshal(containerInfo.GIDMap)
+	if err != nil {
+		return nil, err
+	}
+	specgen.AddAnnotation(annotations.GIDMappings, string(gidMapJSON))
 
 	// Add image volumes
 	volumeMounts, err := addImageVolumes(mountPoint, s, &containerInfo, &specgen, mountLabel)
@@ -1281,6 +1345,20 @@ func (s *Server) createSandboxContainer(ctx context.Context, containerID string,
 	if linux != nil {
 		if err = setupContainerUser(&specgen, mountPoint, linux.GetSecurityContext(), containerImageConfig); err != nil {
 			return nil, err
+		}
+		// Set ID mappings in the namespace to match the on-disk values, which may have been
+		// set even if we didn't specifically request any.
+		if len(containerInfo.UIDMap) > 0 || len(containerInfo.GIDMap) > 0 {
+			for _, m := range containerInfo.UIDMap {
+				specgen.AddLinuxUIDMapping(m.HostID, m.ContainerID, m.Size)
+			}
+			for _, m := range containerInfo.GIDMap {
+				specgen.AddLinuxGIDMapping(m.HostID, m.ContainerID, m.Size)
+			}
+		} else if userNamespaceMode != pb.NamespaceMode_NODE {
+			// The runtime may require at least some mappings to be specified
+			specgen.AddLinuxUIDMapping(0, 0, 0xffffffff)
+			specgen.AddLinuxGIDMapping(0, 0, 0xffffffff)
 		}
 	}
 
