@@ -1013,7 +1013,7 @@ func (s *Server) createSandboxContainer(ctx context.Context, containerID string,
 	userNamespaceMode := pb.NamespaceMode_NODE
 	if linux != nil {
 		// If we ever get User namespace options, this should key off of that instead of Network.
-		userNamespaceMode = containerConfig.GetLinux().GetSecurityContext().GetNamespaceOptions().GetNetwork()
+		// userNamespaceMode = containerConfig.GetLinux().GetSecurityContext().GetNamespaceOptions().GetNetwork()
 		switch userNamespaceMode {
 		case pb.NamespaceMode_NODE:
 			// Use no ID mappings.
