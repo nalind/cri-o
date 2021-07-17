@@ -268,6 +268,9 @@ The "crio.runtime.runtimes" table defines a list of OCI compatible runtimes.  Th
 **runtime_type**="oci"
   Type of the runtime used for this runtime handler. "oci", "vm"
 
+**runtime_config_path**=""
+  Path to the runtime configuration file, should only be used with VM runtime types
+
 **privileged_without_host_devices**=false
   Whether this runtime handler prevents host devices from being passed to privileged containers.
 
@@ -337,6 +340,9 @@ The `crio.metrics` table containers settings pertaining to the Prometheus based 
 
 **enable_custom_shm_size**=false
 If set to true, enable users to set a custom shm size instead of using the default value of 64M. The shm size can be set through K8S annotation with the key "io.kubernetes.cri-o.ShmSize", and the value representing the size in human readable format. For example: "io.kubernetes.cri-o.ShmSize: 128Mi"
+
+**metrics_collectors**=["operations", "operations_latency_microseconds_total", "operations_latency_microseconds", "operations_errors", "image_pulls_by_digest", "image_pulls_by_name", "image_pulls_by_name_skipped", "image_pulls_failures", "image_pulls_successes", "image_pulls_layer_size", "image_layer_reuse", "containers_oom_total", "containers_oom"]
+  Enabled metrics collectors
 
 **metrics_port**=9090
   The port on which the metrics server will listen.

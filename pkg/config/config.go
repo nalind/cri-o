@@ -21,6 +21,7 @@ import (
 	"github.com/cri-o/cri-o/internal/config/apparmor"
 	"github.com/cri-o/cri-o/internal/config/capabilities"
 	"github.com/cri-o/cri-o/internal/config/cgmgr"
+	"github.com/cri-o/cri-o/internal/config/cnimgr"
 	"github.com/cri-o/cri-o/internal/config/conmonmgr"
 	"github.com/cri-o/cri-o/internal/config/device"
 	"github.com/cri-o/cri-o/internal/config/node"
@@ -28,6 +29,7 @@ import (
 	"github.com/cri-o/cri-o/internal/config/seccomp"
 	"github.com/cri-o/cri-o/internal/config/ulimits"
 	"github.com/cri-o/cri-o/pkg/annotations"
+	"github.com/cri-o/cri-o/server/metrics/collectors"
 	"github.com/cri-o/cri-o/server/useragent"
 	"github.com/cri-o/cri-o/utils"
 	"github.com/cri-o/ocicni/pkg/ocicni"
@@ -161,9 +163,11 @@ type RootConfig struct {
 // RuntimeHandler represents each item of the "crio.runtime.runtimes" TOML
 // config table.
 type RuntimeHandler struct {
-	RuntimePath string `toml:"runtime_path"`
-	RuntimeType string `toml:"runtime_type"`
-	RuntimeRoot string `toml:"runtime_root"`
+	RuntimeConfigPath string `toml:"runtime_config_path"`
+	RuntimePath       string `toml:"runtime_path"`
+	RuntimeType       string `toml:"runtime_type"`
+	RuntimeRoot       string `toml:"runtime_root"`
+
 	// PrivilegedWithoutHostDevices can be used to restrict passing host devices
 	// to a container running as privileged.
 	PrivilegedWithoutHostDevices bool `toml:"privileged_without_host_devices,omitempty"`
@@ -408,8 +412,8 @@ type NetworkConfig struct {
 	// PluginDirs is where CNI plugin binaries are stored.
 	PluginDirs []string `toml:"plugin_dirs"`
 
-	// cniPlugin is the internal OCI CNI plugin
-	cniPlugin ocicni.CNIPlugin
+	// cniManager manages the internal ocicni plugin
+	cniManager *cnimgr.CNIManager
 }
 
 // APIConfig represents the "crio.api" TOML config table.
@@ -453,6 +457,9 @@ type APIConfig struct {
 type MetricsConfig struct {
 	// EnableMetrics can be used to globally enable or disable metrics support
 	EnableMetrics bool `toml:"enable_metrics"`
+
+	// MetricsCollectors specifies enabled metrics collectors.
+	MetricsCollectors collectors.Collectors `toml:"metrics_collectors"`
 
 	// MetricsPort is the port on which the metrics server will listen.
 	MetricsPort int `toml:"metrics_port"`
@@ -679,7 +686,8 @@ func DefaultConfig() (*Config, error) {
 			PluginDirs: []string{cniBinDir},
 		},
 		MetricsConfig: MetricsConfig{
-			MetricsPort: 9090,
+			MetricsPort:       9090,
+			MetricsCollectors: collectors.All(),
 		},
 	}, nil
 }
@@ -821,9 +829,10 @@ func (c *RuntimeConfig) Validate(systemContext *types.SystemContext, onExecution
 			// first. If it does not exist then we add runc + its path to the runtimes map.
 			if _, ok := c.Runtimes[defaultRuntime]; !ok {
 				c.Runtimes[defaultRuntime] = &RuntimeHandler{
-					RuntimePath: "",
-					RuntimeType: DefaultRuntimeType,
-					RuntimeRoot: DefaultRuntimeRoot,
+					RuntimePath:       "",
+					RuntimeType:       DefaultRuntimeType,
+					RuntimeRoot:       DefaultRuntimeRoot,
+					RuntimeConfigPath: "",
 				}
 			}
 			// Set the DefaultRuntime to runc so we don't fail further along in the code
@@ -1071,13 +1080,13 @@ func (c *NetworkConfig) Validate(onExecution bool) error {
 		}
 
 		// Init CNI plugin
-		cniPlugin, err := ocicni.InitCNI(
+		cniManager, err := cnimgr.New(
 			c.CNIDefaultNetwork, c.NetworkDir, c.PluginDirs...,
 		)
 		if err != nil {
 			return errors.Wrap(err, "initialize CNI plugin")
 		}
-		c.cniPlugin = cniPlugin
+		c.cniManager = cniManager
 	}
 
 	return nil
@@ -1086,6 +1095,9 @@ func (c *NetworkConfig) Validate(onExecution bool) error {
 // Validate checks if the whole runtime is valid.
 func (r *RuntimeHandler) Validate(name string) error {
 	if err := r.ValidateRuntimePath(name); err != nil {
+		return err
+	}
+	if err := r.ValidateRuntimeConfigPath(name); err != nil {
 		return err
 	}
 	if err := r.ValidateRuntimeAllowedAnnotations(); err != nil {
@@ -1146,6 +1158,21 @@ func (r *RuntimeHandler) ValidateRuntimeType(name string) error {
 	return nil
 }
 
+// ValidateRuntimeConfigPath checks if the `RuntimeConfigPath` exists.
+func (r *RuntimeHandler) ValidateRuntimeConfigPath(name string) error {
+	if r.RuntimeConfigPath == "" {
+		return nil
+	}
+	if r.RuntimeType != RuntimeTypeVM {
+		return fmt.Errorf("runtime_config_path can only be used with the 'vm' runtime type")
+	}
+	if _, err := os.Stat(r.RuntimeConfigPath); err != nil && os.IsNotExist(err) {
+		return fmt.Errorf("invalid runtime_config_path for runtime '%s': %q",
+			name, err)
+	}
+	return nil
+}
+
 func (r *RuntimeHandler) ValidateRuntimeAllowedAnnotations() error {
 	disallowedAnnotations := make(map[string]struct{})
 	for _, ann := range annotations.AllAllowedAnnotations {
@@ -1168,7 +1195,17 @@ func (r *RuntimeHandler) ValidateRuntimeAllowedAnnotations() error {
 
 // CNIPlugin returns the network configuration CNI plugin
 func (c *NetworkConfig) CNIPlugin() ocicni.CNIPlugin {
-	return c.cniPlugin
+	return c.cniManager.Plugin()
+}
+
+// CNIPluginReadyOrError returns whether the cni plugin is ready
+func (c *NetworkConfig) CNIPluginReadyOrError() error {
+	return c.cniManager.ReadyOrError()
+}
+
+// CNIPluginAddWatcher returns the network configuration CNI plugin
+func (c *NetworkConfig) CNIPluginAddWatcher() chan struct{} {
+	return c.cniManager.AddWatcher()
 }
 
 // SetSingleConfigPath set single config path for config

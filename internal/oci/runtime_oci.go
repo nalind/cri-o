@@ -21,10 +21,10 @@ import (
 	"github.com/cri-o/cri-o/server/cri/types"
 	"github.com/cri-o/cri-o/server/metrics"
 	"github.com/cri-o/cri-o/utils"
-	"github.com/fsnotify/fsnotify"
 	json "github.com/json-iterator/go"
 	rspec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
+	"github.com/rjeczalik/notify"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
 	"golang.org/x/sys/unix"
@@ -331,11 +331,13 @@ func (r *runtimeOCI) ExecSyncContainer(ctx context.Context, c *Container, comman
 	}
 	defer os.RemoveAll(processFile)
 
-	pidFile, err := createPidFile()
+	pidDir, err := ioutil.TempDir("", "pidfile")
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(pidFile)
+	defer os.RemoveAll(pidDir)
+
+	pidFile := filepath.Join(pidDir, c.id)
 
 	cmd := r.constructExecCommand(ctx, c, processFile, pidFile)
 	cmd.SysProcAttr = sysProcAttrPlatform()
@@ -344,8 +346,14 @@ func (r *runtimeOCI) ExecSyncContainer(ctx context.Context, c *Container, comman
 	cmd.Stdout = &stdoutBuf
 	cmd.Stderr = &stderrBuf
 
-	err = cmd.Start()
+	pidFileCreatedDone := make(chan struct{}, 1)
+	pidFileCreatedCh, err := WatchForFile(pidFile, pidFileCreatedDone, notify.InModify, notify.InMovedTo)
 	if err != nil {
+		return nil, errors.Wrapf(err, "failed to watch %s", pidFile)
+	}
+
+	doneErr := cmd.Start()
+	if doneErr != nil {
 		return nil, err
 	}
 
@@ -353,13 +361,30 @@ func (r *runtimeOCI) ExecSyncContainer(ctx context.Context, c *Container, comman
 	done := make(chan error, 1)
 	go func() {
 		done <- cmd.Wait()
+		close(done)
 	}()
 
-	if timeout > 0 {
+	// First, wait for the pid file to be created.
+	// When it is, the timer begins for the exec process.
+	// If the command fails before that happens, however,
+	// that needs to be caught.
+	select {
+	case <-pidFileCreatedCh:
+	case doneErr = <-done:
+	}
+	close(pidFileCreatedDone)
+
+	switch {
+	case doneErr != nil:
+		// If we've already gotten an error from done
+		// the runtime finished before writing the pid file
+		// (probably because the command didn't exist).
+	case timeout > 0:
+		// If there's a timeout, wait for that timeout duration.
 		select {
 		case <-time.After(time.Second * time.Duration(timeout)):
 			// Ensure the process is not left behind
-			killContainerExecProcess(ctx, pidFile)
+			killContainerExecProcess(ctx, pidFile, cmd)
 
 			// Make sure the runtime process has been cleaned up
 			<-done
@@ -371,17 +396,18 @@ func (r *runtimeOCI) ExecSyncContainer(ctx context.Context, c *Container, comman
 				Stderr:   []byte(conmonconfig.TimedOutMessage),
 				ExitCode: -1,
 			}, nil
-		case err = <-done:
+		case doneErr = <-done:
 			break
 		}
-	} else {
-		err = <-done
+	default:
+		// If no timeout, just wait until the command finishes.
+		doneErr = <-done
 	}
 
 	// gather exit code from err
 	exitCode := int32(0)
-	if err != nil {
-		if exitError, ok := err.(*exec.ExitError); ok {
+	if doneErr != nil {
+		if exitError, ok := doneErr.(*exec.ExitError); ok {
 			exitCode = int32(exitError.ExitCode())
 		}
 	}
@@ -406,24 +432,15 @@ func (r *runtimeOCI) constructExecCommand(ctx context.Context, c *Container, pro
 	return execCmd
 }
 
-func createPidFile() (string, error) {
-	pidFile, err := ioutil.TempFile("", "pidfile")
-	if err != nil {
-		return "", err
-	}
-	pidFile.Close()
-	pidFileName := pidFile.Name()
-
-	return pidFileName, nil
-}
-
-func killContainerExecProcess(ctx context.Context, pidFile string) {
+func killContainerExecProcess(ctx context.Context, pidFile string, cmd *exec.Cmd) {
 	// Attempt to get the container PID and PGID from the file the runtime should have written.
-	// TODO(haircommander): There does exist a race that we could time out before the runtime actually creates the file.
-	// Should we do inotify on this file to ensure it exists? Is that overkill?
 	ctrPid, ctrPgid, err := pidAndpgidFromFile(pidFile)
-	if err != nil {
-		log.Errorf(ctx, "Failed to get pid (%d) or pgid (%d) from file %s: %v", ctrPid, ctrPgid, pidFile, err)
+	if err != nil && ctrPid <= 0 {
+		// only kill the runtime process if we failed to find a ctrPid
+		// as this means the runtime exec hasn't successfully written the pid file
+		if killErr := cmd.Process.Kill(); killErr != nil {
+			log.Errorf(ctx, "Error killing runtime exec process(%v) after error finding runtime pid: (%v)", killErr, err)
+		}
 	}
 
 	if ctrPgid > 1 {
@@ -764,15 +781,10 @@ func (r *runtimeOCI) UpdateContainerStatus(ctx context.Context, c *Container) er
 		c.state.OOMKilled = true
 
 		// Collect total metric
-		metrics.CRIOContainersOOMTotal.Inc()
+		metrics.Instance().MetricContainersOOMTotalInc()
 
 		// Collect metric by container name
-		counter, err := metrics.CRIOContainersOOM.GetMetricWithLabelValues(c.Name())
-		if err != nil {
-			log.Warnf(ctx, "Unable to write OOM metric by container: %v", err)
-		} else {
-			counter.Inc()
-		}
+		metrics.Instance().MetricContainersOOMInc(c.Name())
 	}
 
 	return nil
@@ -1016,58 +1028,22 @@ func (r *runtimeOCI) ReopenContainerLog(ctx context.Context, c *Container) error
 	}
 	defer controlFile.Close()
 
-	watcher, err := fsnotify.NewWatcher()
+	done := make(chan struct{}, 1)
+	ch, err := WatchForFile(c.LogPath(), done, notify.InCreate, notify.InModify)
 	if err != nil {
-		return fmt.Errorf("failed to create new watch: %v", err)
-	}
-	defer watcher.Close()
-
-	done := make(chan struct{})
-	doneClosed := false
-	errorCh := make(chan error)
-	go func() {
-		for {
-			select {
-			case event := <-watcher.Events:
-				log.Debugf(ctx, "Event: %v", event)
-				if event.Op&fsnotify.Create == fsnotify.Create || event.Op&fsnotify.Write == fsnotify.Write {
-					log.Debugf(ctx, "File created %s", event.Name)
-					if event.Name == c.LogPath() {
-						log.Debugf(ctx, "Expected log file created")
-						done <- struct{}{}
-						return
-					}
-				}
-			case err := <-watcher.Errors:
-				errorCh <- fmt.Errorf("watch error for container log reopen %v: %v", c.ID(), err)
-				close(errorCh)
-				return
-			}
-		}
-	}()
-	cLogDir := filepath.Dir(c.LogPath())
-	if err := watcher.Add(cLogDir); err != nil {
-		log.Errorf(ctx, "Watcher.Add(%q) failed: %s", cLogDir, err)
-		close(done)
-		doneClosed = true
+		return errors.Wrapf(err, "failed to create watch for %s", c.LogPath())
 	}
 
 	if _, err = fmt.Fprintf(controlFile, "%d %d %d\n", 2, 0, 0); err != nil {
 		log.Debugf(ctx, "Failed to write to control file to reopen log file: %v", err)
 	}
-
 	select {
-	case err := <-errorCh:
-		if !doneClosed {
-			close(done)
-		}
-		return err
-	case <-done:
-		if !doneClosed {
-			close(done)
-		}
-		break
+	case <-ch:
+	case <-time.After(time.Minute * 3):
+		// Give up after 3 minutes, as something wrong probably happened
+		log.Errorf(ctx, "Failed to reopen log file for container %s: timed out", c.ID())
 	}
+	close(done)
 
 	return nil
 }
@@ -1110,4 +1086,35 @@ func prepareProcessExec(c *Container, cmd []string, tty bool) (processFile strin
 
 func (c *Container) conmonPidFilePath() string {
 	return filepath.Join(c.bundlePath, "conmon-pidfile")
+}
+
+// WatchForFile creates a watch on the parent directory of path, looking for events opsToWatch.
+// It returns immediately with a channel to find when path had one of those events.
+// done can be used to stop the watch.
+// WatchForFile is responsible for closing all internal channels and the returned channel, but not for closing done.
+func WatchForFile(path string, done chan struct{}, opsToWatch ...notify.Event) (chan struct{}, error) {
+	eiCh := make(chan notify.EventInfo, 1)
+	ch := make(chan struct{})
+
+	dir := filepath.Dir(path)
+	if err := notify.Watch(dir, eiCh, opsToWatch...); err != nil {
+		return nil, err
+	}
+	go func() {
+		defer close(ch)
+		defer close(eiCh)
+		defer notify.Stop(eiCh)
+		for {
+			select {
+			case ei := <-eiCh:
+				if ei.Path() == path {
+					ch <- struct{}{}
+					return
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
+	return ch, nil
 }

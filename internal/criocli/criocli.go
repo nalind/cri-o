@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	libconfig "github.com/cri-o/cri-o/pkg/config"
+	"github.com/cri-o/cri-o/server/metrics/collectors"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
@@ -136,16 +137,28 @@ func mergeConfig(config *libconfig.Config, ctx *cli.Context) error {
 			fields := strings.Split(r, ":")
 
 			runtimeType := libconfig.DefaultRuntimeType
+			privilegedWithoutHostDevices := false
+			runtimeConfigPath := ""
 
 			switch len(fields) {
+			case 6:
+				runtimeConfigPath = fields[5]
+				fallthrough
+			case 5:
+				if fields[4] == "true" {
+					privilegedWithoutHostDevices = true
+				}
+				fallthrough
 			case 4:
 				runtimeType = fields[3]
 				fallthrough
 			case 3:
 				config.Runtimes[fields[0]] = &libconfig.RuntimeHandler{
-					RuntimePath: fields[1],
-					RuntimeRoot: fields[2],
-					RuntimeType: runtimeType,
+					RuntimePath:                  fields[1],
+					RuntimeRoot:                  fields[2],
+					RuntimeType:                  runtimeType,
+					PrivilegedWithoutHostDevices: privilegedWithoutHostDevices,
+					RuntimeConfigPath:            runtimeConfigPath,
 				}
 			default:
 				return fmt.Errorf("wrong format for --runtimes: %q", r)
@@ -310,6 +323,9 @@ func mergeConfig(config *libconfig.Config, ctx *cli.Context) error {
 	}
 	if ctx.IsSet("metrics-key") {
 		config.MetricsKey = ctx.String("metrics-key")
+	}
+	if ctx.IsSet("metrics-collectors") {
+		config.MetricsCollectors = collectors.FromSlice(ctx.StringSlice("metrics-collectors"))
 	}
 	if ctx.IsSet("big-files-temporary-dir") {
 		config.BigFilesTemporaryDir = ctx.String("big-files-temporary-dir")
@@ -531,7 +547,7 @@ func getCrioFlags(defConf *libconfig.Config) []cli.Flag {
 		},
 		&cli.StringSliceFlag{
 			Name:    "runtimes",
-			Usage:   "OCI runtimes, format is runtime_name:runtime_path:runtime_root:runtime_type",
+			Usage:   "OCI runtimes, format is runtime_name:runtime_path:runtime_root:runtime_type:privileged_without_host_devices:runtime_config_path",
 			EnvVars: []string{"CONTAINER_RUNTIMES"},
 		},
 		&cli.StringFlag{
@@ -702,6 +718,12 @@ func getCrioFlags(defConf *libconfig.Config) []cli.Flag {
 			Name:    "metrics-key",
 			Usage:   "Certificate key for the secure metrics endpoint",
 			EnvVars: []string{"CONTAINER_METRICS_KEY"},
+		},
+		&cli.StringSliceFlag{
+			Name:    "metrics-collectors",
+			Usage:   "Enabled metrics collectors",
+			Value:   cli.NewStringSlice(collectors.All().ToSlice()...),
+			EnvVars: []string{"CONTAINER_METRICS_COLLECTORS"},
 		},
 		&cli.StringFlag{
 			Name:    "big-files-temporary-dir",

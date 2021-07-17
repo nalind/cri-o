@@ -60,6 +60,7 @@ crio
 [--log-size-max]=[value]
 [--log]=[value]
 [--metrics-cert]=[value]
+[--metrics-collectors]=[value]
 [--metrics-key]=[value]
 [--metrics-port]=[value]
 [--metrics-socket]=[value]
@@ -260,6 +261,8 @@ crio [GLOBAL OPTIONS] command [COMMAND OPTIONS] [ARGUMENTS...]
 
 **--metrics-cert**="": Certificate for the secure metrics endpoint
 
+**--metrics-collectors**="": Enabled metrics collectors (default: [operations operations_latency_microseconds_total operations_latency_microseconds operations_errors image_pulls_by_digest image_pulls_by_name image_pulls_by_name_skipped image_pulls_failures image_pulls_successes image_pulls_layer_size image_layer_reuse containers_oom_total containers_oom])
+
 **--metrics-key**="": Certificate key for the secure metrics endpoint
 
 **--metrics-port**="": Port for the metrics endpoint (default: 9090)
@@ -292,7 +295,7 @@ crio [GLOBAL OPTIONS] command [COMMAND OPTIONS] [ARGUMENTS...]
 
 **--runroot**="": The CRI-O state directory (default: /run/containers/storage)
 
-**--runtimes**="": OCI runtimes, format is runtime_name:runtime_path:runtime_root:runtime_type (default: [])
+**--runtimes**="": OCI runtimes, format is runtime_name:runtime_path:runtime_root:runtime_type:privileged_without_host_devices:runtime_config_path (default: [])
 
 **--seccomp-profile**="": Path to the seccomp.json profile to be used as the runtime's default. If not specified, then the internal default seccomp profile will be used. (default: "")
 

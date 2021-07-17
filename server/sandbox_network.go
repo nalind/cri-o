@@ -58,8 +58,7 @@ func (s *Server) networkStart(ctx context.Context, sb *sandbox.Sandbox) (podIPs 
 		return nil, nil, fmt.Errorf("failed to create pod network sandbox %s(%s): %v", sb.Name(), sb.ID(), err)
 	}
 	// metric about the CNI network setup operation
-	metrics.CRIOOperationsLatency.WithLabelValues("network_setup_pod").
-		Set(metrics.SinceInMicroseconds(podSetUpStart))
+	metrics.Instance().MetricOperationsLatencySet("network_setup_pod", podSetUpStart)
 
 	podNetworkStatus, err := s.config.CNIPlugin().GetPodNetworkStatusWithContext(startCtx, podNetwork)
 	if err != nil {
@@ -120,8 +119,7 @@ func (s *Server) networkStart(ctx context.Context, sb *sandbox.Sandbox) (podIPs 
 	log.Debugf(ctx, "Found POD IPs: %v", podIPs)
 
 	// metric about the whole network setup operation
-	metrics.CRIOOperationsLatency.WithLabelValues("network_setup_overall").
-		Set(metrics.SinceInMicroseconds(overallStart))
+	metrics.Instance().MetricOperationsLatencySet("network_setup_overall", overallStart)
 	return podIPs, result, err
 }
 
@@ -223,6 +221,7 @@ func (s *Server) newPodNetwork(sb *sandbox.Sandbox) (ocicni.PodNetwork, error) {
 	return ocicni.PodNetwork{
 		Name:      sb.KubeName(),
 		Namespace: sb.Namespace(),
+		UID:       sb.Metadata().UID,
 		Networks:  []ocicni.NetAttachment{},
 		ID:        sb.ID(),
 		NetNS:     sb.NetNsPath(),

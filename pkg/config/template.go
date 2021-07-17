@@ -446,6 +446,11 @@ func initCrioTemplateConfig(c *Config) ([]*templateConfigValue, error) {
 			isDefaultValue: simpleEqual(dc.EnableMetrics, c.EnableMetrics),
 		},
 		{
+			templateString: templateStringCrioMetricsCollectors,
+			group:          crioMetricsConfig,
+			isDefaultValue: stringSliceEqual(dc.MetricsCollectors.ToSlice(), c.MetricsCollectors.ToSlice()),
+		},
+		{
 			templateString: templateStringCrioMetricsMetricsPort,
 			group:          crioMetricsConfig,
 			isDefaultValue: simpleEqual(dc.MetricsPort, c.MetricsPort),
@@ -951,6 +956,8 @@ const templateStringCrioRuntimeRuntimesRuntimeHandler = `# The "crio.runtime.run
 #   omitted, an "oci" runtime is assumed.
 # - runtime_root (optional, string): root directory for storage of containers
 #   state.
+# - runtime_config_path (optional, string): the path for the runtime configuration
+#   file. This can only be used with when using the VM runtime_type.
 # - privileged_without_host_devices (optional, bool): an option for restricting
 #   host devices from being passed to privileged containers.
 # - allowed_annotations (optional, array of strings): an option for specifying
@@ -967,6 +974,7 @@ const templateStringCrioRuntimeRuntimesRuntimeHandler = `# The "crio.runtime.run
 runtime_path = "{{ $runtime_handler.RuntimePath }}"
 runtime_type = "{{ $runtime_handler.RuntimeType }}"
 runtime_root = "{{ $runtime_handler.RuntimeRoot }}"
+runtime_config_path = "{{ $runtime_handler.RuntimeConfigPath }}"
 {{ if $runtime_handler.PrivilegedWithoutHostDevices }}
 privileged_without_host_devices = {{ $runtime_handler.PrivilegedWithoutHostDevices }}
 {{ end }}
@@ -1134,6 +1142,16 @@ enable_metrics = {{ .EnableMetrics }}
 
 `
 
+const templateStringCrioMetricsCollectors = `# Specify enabled metrics collectors.
+# Per default all metrics are enabled.
+# It is possible, to prefix the metrics with "container_runtime_" and "crio_".
+# For example, the metrics collector "operations" would be treated in the same
+# way as "crio_operations" and "container_runtime_crio_operations".
+metrics_collectors = [
+{{ range $opt := .MetricsCollectors }}{{ printf "\t%q,\n" $opt }}{{ end }}]
+
+`
+
 const templateStringCrioMetricsMetricsPort = `# The port on which the metrics server will listen.
 metrics_port = {{ .MetricsPort }}
 
@@ -1145,11 +1163,15 @@ metrics_socket = "{{ .MetricsSocket }}"
 `
 
 const templateStringCrioMetricsMetricsCert = `# The certificate for the secure metrics server.
+# If the certificate is not available on disk, then CRI-O will generate a
+# self-signed one. CRI-O also watches for changes of this path and reloads the
+# certificate on any modification event.
 metrics_cert = "{{ .MetricsCert }}"
 
 `
 
 const templateStringCrioMetricsMetricsKey = `# The certificate key for the secure metrics server.
+# Behaves in the same way as the metrics_cert.
 metrics_key = "{{ .MetricsKey }}"
 
 `

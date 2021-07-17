@@ -18,7 +18,7 @@ CRI-O follows the Kubernetes release cycles with respect to its minor versions
 (`1.x.0`). Patch releases (`1.x.y`) for CRI-O are not in sync with those from
 Kubernetes, because those are scheduled for each month, whereas CRI-O provides
 them only if necessary. If a Kubernetes release goes [End of
-Life](https://github.com/kubernetes/sig-release/blob/master/releases/patch-releases.md),
+Life](https://github.com/kubernetes/website/blob/main/content/en/releases/patch-releases.md),
 then the corresponding CRI-O version can be considered in the same way.
 
 This means that CRI-O also follows the Kubernetes `n-2` release version skew
@@ -225,6 +225,10 @@ Please refer to the [CRI-O Metrics guide](tutorials/metrics.md).
 
 Some aspects of the Container Runtime are worth some additional explanation.
 These details are summarized in a [dedicated guide](cri.md).
+
+#### Debugging tips
+
+Having an issue? There are some tips and tricks for debugging located in [our debugging guide](tutorials/debugging.md)
 
 ## Adopters
 

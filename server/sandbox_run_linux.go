@@ -302,11 +302,30 @@ func (s *Server) runPodSandbox(ctx context.Context, req *types.RunPodSandboxRequ
 	}()
 
 	if _, err := s.ReservePodName(sbox.ID(), sbox.Name()); err != nil {
+		reservedID, getErr := s.PodIDForName(sbox.Name())
+		if getErr != nil {
+			return nil, errors.Wrapf(getErr, "Failed to get ID of pod with reserved name (%s), after failing to reserve name with %v", sbox.Name(), getErr)
+		}
+		// if we're able to find the sandbox, and it's created, this is actually a duplicate request
+		// from a client that does not behave like the kubelet (like crictl)
+		if reservedSbox := s.GetSandbox(reservedID); reservedSbox != nil && reservedSbox.Created() {
+			return nil, err
+		}
 		cachedID, resourceErr := s.getResourceOrWait(ctx, sbox.Name(), "sandbox")
 		if resourceErr == nil {
 			return &types.RunPodSandboxResponse{PodSandboxID: cachedID}, nil
 		}
 		return nil, errors.Wrapf(err, resourceErr.Error())
+	}
+
+	securityContext := sbox.Config().Linux.SecurityContext
+	hostNetwork := securityContext.NamespaceOptions.Network == types.NamespaceModeNODE
+
+	if err := s.config.CNIPluginReadyOrError(); err != nil && !hostNetwork {
+		// if the cni plugin isn't ready yet, we should wait until it is
+		// before proceeding
+		watcher := s.config.CNIPluginAddWatcher()
+		<-watcher
 	}
 
 	description := fmt.Sprintf("runSandbox: releasing pod sandbox name: %s", sbox.Name())
@@ -347,7 +366,6 @@ func (s *Server) runPodSandbox(ctx context.Context, req *types.RunPodSandboxRequ
 	})
 
 	var labelOptions []string
-	securityContext := sbox.Config().Linux.SecurityContext
 	selinuxConfig := securityContext.SelinuxOptions
 	if selinuxConfig != nil {
 		labelOptions = utils.GetLabelOptions(selinuxConfig)
@@ -520,6 +538,10 @@ func (s *Server) runPodSandbox(ctx context.Context, req *types.RunPodSandboxRequ
 		log.Infof(ctx, description)
 		err2 := s.CtrIDIndex().Delete(sbox.ID())
 		if err2 != nil {
+			// already deleted
+			if strings.Contains(err2.Error(), noSuchID) {
+				return nil
+			}
 			log.Warnf(ctx, "Could not delete ctr id %s from idIndex", sbox.ID())
 		}
 		return err2
@@ -532,8 +554,6 @@ func (s *Server) runPodSandbox(ctx context.Context, req *types.RunPodSandboxRequ
 	if err := utils.EnsureSaneLogPath(logPath); err != nil {
 		return nil, err
 	}
-
-	hostNetwork := securityContext.NamespaceOptions.Network == types.NamespaceModeNODE
 
 	hostname, err := getHostname(sbox.ID(), sbox.Config().Hostname, hostNetwork)
 	if err != nil {
